@@ -1,0 +1,8 @@
+node_modules/
+.env
+.env.txt
+whatsapp-session/
+.wwebjs_cache/
+.wwebjs_auth/
+pizzabot-data/
+server.js.backup

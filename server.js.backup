@@ -1,0 +1,130 @@
+require('dotenv').config();
+
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode-terminal');
+
+const N8N_WEBHOOK_URL =
+    'http://localhost:5678/webhook/whatsapp-ai-bot';
+
+if (
+    !N8N_WEBHOOK_URL.startsWith('http://') &&
+    !N8N_WEBHOOK_URL.startsWith('https://')
+) {
+    throw new Error('http://localhost:5678/webhook-test/whatsapp-ai-bot.');
+}
+
+const client = new Client({
+    authStrategy: new LocalAuth({
+        dataPath: './whatsapp-session',
+    }),
+    puppeteer: {
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    },
+});
+
+const processedMessages = new Set();
+const busyChats = new Set();
+
+client.on('qr', (qr) => {
+    console.log('Scan this QR code using WhatsApp:');
+    qrcode.generate(qr, { small: true });
+});
+
+client.on('authenticated', () => {
+    console.log('WhatsApp authenticated.');
+});
+
+client.on('ready', () => {
+    console.log('WhatsApp AI chatbot is ready!');
+});
+
+client.on('message', async (message) => {
+    if (message.fromMe || message.isStatus || !message.body.trim()) {
+        return;
+    }
+
+    const messageId = message.id?._serialized;
+
+    if (messageId && processedMessages.has(messageId)) {
+        return;
+    }
+
+    if (messageId) {
+        processedMessages.add(messageId);
+    }
+
+    const chatId = message.from;
+
+    if (busyChats.has(chatId)) {
+        console.log('Skipping message because this chat is busy:', chatId);
+        return;
+    }
+
+    busyChats.add(chatId);
+
+    try {
+        console.log('Incoming message:', message.body);
+
+        const response = await fetch(N8N_WEBHOOK_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                message: message.body,
+                chatId: chatId,
+            }),
+            signal: AbortSignal.timeout(60000),
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(
+                `n8n returned HTTP ${response.status}: ${errorText}`
+            );
+        }
+
+        const data = await response.json();
+        const reply =
+            typeof data.reply === 'string' ? data.reply.trim() : '';
+
+        if (!reply) {
+            console.error('Unexpected n8n response:', data);
+            throw new Error(
+                'n8n response is missing a non-empty "reply" field.'
+            );
+        }
+
+        await message.reply(reply);
+        console.log('Gemini AI reply sent through n8n.');
+
+    } catch (error) {
+        console.error('AI reply error:', error.message);
+
+        try {
+            await message.reply(
+                'Sorry, I am having trouble responding right now. Please try again shortly.'
+            );
+        } catch (replyError) {
+            console.error(
+                'Could not send error message:',
+                replyError.message
+            );
+        }
+    } finally {
+        busyChats.delete(chatId);
+    }
+});
+
+client.on('auth_failure', (message) => {
+    console.error('WhatsApp authentication failed:', message);
+});
+
+client.on('disconnected', (reason) => {
+    console.log('WhatsApp disconnected:', reason);
+});
+
+client.initialize().catch((error) => {
+    console.error('WhatsApp initialization failed:', error);
+});
